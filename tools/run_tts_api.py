@@ -31,6 +31,8 @@ def write_yaml() -> Path:
     for p in (gpt_w, vits_w):
         if not p.exists():
             raise FileNotFoundError(f"权重不存在: {p}")
+    config.TTS_YAML.parent.mkdir(parents=True, exist_ok=True)  # 全新环境无 generated/ 目录
+    config.LOG_DIR.mkdir(parents=True, exist_ok=True)          # 全新环境无 logs/ 目录
     config.TTS_YAML.write_text(
         YAML_TEMPLATE.format(gpt_weights=gpt_w.as_posix(),
                              sovits_weights=vits_w.as_posix(),
