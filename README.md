@@ -39,7 +39,7 @@
 1. **下载本仓库**（Code → Download ZIP，或 `git clone`），解压到任意位置。
 2. **双击 `install.bat`**，耐心等待。它会自动完成：
    - 下载并解压 GPT-SoVITS 语音引擎（约 8 GB）
-   - 下载语音模型（默认音色；s1v3.ckpt 直接复用引擎自带文件，只需下载约 129 MB 的音色模型）
+   - 下载语音模型（默认音色；只需下载约 129 MB 的 `sf_e8_s144.pth`，GPT 底模 `s1v3.ckpt` 用引擎自带的）
    - 安装 Ollama（本地大模型服务）
    - 下载对话模型 `qwen3-8b`（约 5 GB）
 3. 中途若提示安装 Ollama，按提示操作后**重新双击 `install.bat`** 继续。

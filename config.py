@@ -30,13 +30,15 @@ TTS_API_HOST = "127.0.0.1"
 TTS_API_PORT = 9880
 TTS_API = f"http://{TTS_API_HOST}:{TTS_API_PORT}"
 
-# ---- 语音模型文件（voice_model/ 仅存两个权重，由 install 从 GitHub Release 下载） ----
+# ---- 语音模型文件（voice_model/ 只放音色模型，由 install 从 GitHub Release 下载） ----
 #   GPT（文本->读音）用【预训练 s1v3.ckpt】——微调版 GPT 是用中文乱码转写训练的，已废；
+#   该文件在引擎集成包内自带（GPT_SoVITS/pretrained_models/），与 Release 文件 SHA256 一致，
+#   所以直接指向引擎里那份，voice_model/ 不再重复存放。
 #   SoVITS（音色）用微调 sf_e8_s144.pth——保留 sweetiefox 音色。
-# 推理所需的 BERT/HuBERT/语言检测等头模型在引擎自带 GPT_SoVITS/pretrained_models/，
+# 推理所需的 BERT/HuBERT/语言检测等头模型也在引擎自带 GPT_SoVITS/pretrained_models/，
 # 通过相对路径加载（见 tools/run_tts_api.py），与 voice_model/ 解耦。
 VOICE_MODEL_DIR = ROOT / "voice_model"
-GPT_WEIGHTS = VOICE_MODEL_DIR / "s1v3.ckpt"
+GPT_WEIGHTS = SOVITS_ROOT / "GPT_SoVITS" / "pretrained_models" / "s1v3.ckpt"
 SOVITS_WEIGHTS = VOICE_MODEL_DIR / "sf_e8_s144.pth"
 TTS_VERSION = "v2Pro"
 TTS_YAML = ROOT / "generated" / "j1_tts_infer.yaml"

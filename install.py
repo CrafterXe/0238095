@@ -4,7 +4,7 @@
 新设备首次使用：双击 install.bat（= 运行本脚本），自动完成：
   1. 下载并解压 GPT-SoVITS 推理引擎到包内 engine\\（约 8GB，官方集成包）
   2. 下载语音模型 voice_model\\（音色模型约 129MB，GitHub Release；
-     GPT 底模 s1v3.ckpt 复用引擎自带文件，无需重复下载）
+     GPT 底模 s1v3.ckpt 引擎自带，config 直接指向引擎内文件，无需下载）
   3. 检查 / 安装 Ollama（本地大模型服务）
   4. 下载对话模型 R4C3R/qwen3-8b-heretic:q4_k_m（约 5GB）
 
@@ -29,14 +29,12 @@ ENGINE_DIRNAME = "GPT-SoVITS-v2pro-20250604-nvidia50"
 ENGINE_APPROX_GB = 8.2
 # 对话模型（Ollama）
 OLLAMA_MODEL = "R4C3R/qwen3-8b-heretic:q4_k_m"
-# 语音模型（你的音色 + GPT 预训练底模）：从 GitHub Release 直连下载。
+# 语音音色模型：从 GitHub Release 直连下载。
 # 需能访问 github.com（请开启 VPN）；网络中断时脚本会自动断点续传重试。
-# 注：引擎集成包里自带同名 s1v3.ckpt，已实测与 Release 文件 SHA256 完全一致，
-#     若解压后已存在就直接复用，省掉这次下载（只剩 sf_e8_s144.pth 要下）。
+# 注：GPT 底模 s1v3.ckpt 随引擎集成包自带（与 Release 文件 SHA256 一致），
+#     config.py 直接指向引擎内文件，这里不需要再下载。
 VOICE_FILES = {
     # 文件名: (Release 直链, 约略大小MB)
-    "s1v3.ckpt": (
-        "https://github.com/CrafterXe/model-files/releases/download/v1/s1v3.ckpt", 148),
     "sf_e8_s144.pth": (
         "https://github.com/CrafterXe/model-files/releases/download/v1/sf_e8_s144.pth", 129),
 }
@@ -154,18 +152,10 @@ def ensure_voice() -> bool:
     vdir.mkdir(parents=True, exist_ok=True)
     ok = True
     for name, (url, mb) in VOICE_FILES.items():
-        dest = vdir / name
-        # 引擎包自带的同名文件（实测 SHA256 与 Release 一致）直接复用，不再下载
-        bundled = ENGINE_TARGET / "GPT_SoVITS" / "pretrained_models" / name
-        if (not dest.exists() and bundled.exists()
-                and bundled.stat().st_size >= mb * 1024 ** 2 * 0.85):
-            shutil.copy2(bundled, dest)
-            log(f"  [OK] {name} 复用引擎自带文件（与 Release 一致，跳过下载）")
-            continue
-        if not _curl_download(url, dest, mb):
+        if not _curl_download(url, vdir / name, mb):
             ok = False
     if ok:
-        log("  [OK] 语音模型就绪（s1v3.ckpt + sf_e8_s144.pth）")
+        log("  [OK] 语音音色模型就绪（sf_e8_s144.pth）")
     return ok
 
 
@@ -246,7 +236,7 @@ def main():
         ok = False
     log()
 
-    log("[2/4] 语音模型（GitHub Release，需能访问 github.com）...")
+    log("[2/4] 语音音色模型（GitHub Release，需能访问 github.com）...")
     if not ensure_voice():
         ok = False
     log()
