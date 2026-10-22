@@ -3,7 +3,8 @@
 
 新设备首次使用：双击 install.bat（= 运行本脚本），自动完成：
   1. 下载并解压 GPT-SoVITS 推理引擎到包内 engine\\（约 8GB，官方集成包）
-  2. 下载语音模型 voice_model\\（GPT 底模 + 音色模型，约 277MB，GitHub Release）
+  2. 下载语音模型 voice_model\\（音色模型约 129MB，GitHub Release；
+     GPT 底模 s1v3.ckpt 复用引擎自带文件，无需重复下载）
   3. 检查 / 安装 Ollama（本地大模型服务）
   4. 下载对话模型 R4C3R/qwen3-8b-heretic:q4_k_m（约 5GB）
 
@@ -20,16 +21,18 @@ ROOT = Path(__file__).resolve().parent
 
 # ================== 可按需修改 ==================
 # GPT-SoVITS 官方集成包（Windows / NVIDIA，v2pro-20250604）下载地址与解压后目录名。
-# 主用 hf-mirror（国内友好），其会 302 跳转到 HF 官方 CDN；用户需可访问该 CDN（如开 VPN）。
+# 直连 HuggingFace 官方 CDN（不使用镜像站），需能访问 huggingface.co（请开启 VPN）。
 ENGINE_URLS = (
-    "https://hf-mirror.com/lj1995/GPT-SoVITS-windows-package/resolve/main/GPT-SoVITS-v2pro-20250604-nvidia50.7z",
     "https://huggingface.co/lj1995/GPT-SoVITS-windows-package/resolve/main/GPT-SoVITS-v2pro-20250604-nvidia50.7z",
 )
 ENGINE_DIRNAME = "GPT-SoVITS-v2pro-20250604-nvidia50"
 ENGINE_APPROX_GB = 8.2
 # 对话模型（Ollama）
 OLLAMA_MODEL = "R4C3R/qwen3-8b-heretic:q4_k_m"
-# 语音模型（你的音色 + GPT 预训练底模）：从 GitHub Release 下载。
+# 语音模型（你的音色 + GPT 预训练底模）：从 GitHub Release 直连下载。
+# 需能访问 github.com（请开启 VPN）；网络中断时脚本会自动断点续传重试。
+# 注：引擎集成包里自带同名 s1v3.ckpt，已实测与 Release 文件 SHA256 完全一致，
+#     若解压后已存在就直接复用，省掉这次下载（只剩 sf_e8_s144.pth 要下）。
 VOICE_FILES = {
     # 文件名: (Release 直链, 约略大小MB)
     "s1v3.ckpt": (
@@ -66,36 +69,53 @@ def which(name):
     return shutil.which(name) is not None
 
 
-def _curl_download(urls, dest: Path, approx_mb: float = 0) -> bool:
-    """用 curl.exe 下载（自动跟随 302/308 重定向，支持断点续传 -C -）。
-    urls 可为单个 URL 字符串或 URL 元组。已存在且体积接近预期则跳过。"""
+def _curl_download(urls, dest: Path, approx_mb: float = 0, passes: int = 3) -> bool:
+    """用 curl.exe 从 GitHub 直连下载（跟随重定向，断点续传 -C -）。
+    连接中途被重置时，同一源会继续从断点续传（最多 passes 轮）；
+    下载完成后校验体积，明显偏小视为失败并换源。"""
     if isinstance(urls, str):
         urls = (urls,)
     approx_bytes = approx_mb * 1024 ** 2
-    if dest.exists() and (approx_bytes <= 0 or dest.stat().st_size > approx_bytes * 0.9):
+    min_bytes = int(approx_bytes * 0.85)
+    if dest.exists() and (approx_bytes <= 0 or dest.stat().st_size >= min_bytes):
         log(f"  [跳过] 已存在：{dest.name}")
         return True
     dest.parent.mkdir(parents=True, exist_ok=True)
     curl = shutil.which("curl") or "curl.exe"
+    tmp = dest.with_suffix(dest.suffix + ".part")
+    size_txt = f"{approx_mb / 1024:.1f}GB" if approx_mb >= 1024 else f"{approx_mb:.0f}MB"
     for url in urls:
-        size_txt = f"{approx_mb / 1024:.1f}GB" if approx_mb >= 1024 else f"{approx_mb:.0f}MB"
         log(f"  正在下载 {dest.name}（约 {size_txt}）...")
         log(f"  源：{url.split('/')[2]}")
-        tmp = dest.with_suffix(dest.suffix + ".part")
-        code = subprocess.call([
-            curl, "-L", "-C", "-", "--retry", "3", "--retry-delay", "5",
-            "-A", "Mozilla/5.0", "-o", str(tmp), url,
-        ])
-        if code == 0 and tmp.exists() and tmp.stat().st_size > 0:
-            tmp.rename(dest)
-            log(f"  [OK] {dest.name}（{dest.stat().st_size / 1024 ** 2:.0f}MB）")
-            return True
-        log(f"  [失败] 该源下载中断（curl 退出码 {code}），尝试下一个源...")
+        for attempt in range(1, passes + 1):
+            before = tmp.stat().st_size if tmp.exists() else 0
+            code = subprocess.call([
+                curl, "-L", "-C", "-", "--retry", "4", "--retry-delay", "5",
+                "--connect-timeout", "20", "-A", "Mozilla/5.0", "-o", str(tmp), url,
+            ])
+            got = tmp.stat().st_size if tmp.exists() else 0
+            # 33 = 服务器返回 416，说明 .part 已完整
+            if code in (0, 33) and got > 0:
+                if approx_bytes > 0 and got < min_bytes:
+                    log(f"  [失败] 文件不完整（{got / 1024 ** 2:.0f}MB < 约 {approx_mb:.0f}MB），换源...")
+                    tmp.unlink(missing_ok=True)
+                    break
+                tmp.rename(dest)
+                log(f"  [OK] {dest.name}（{got / 1024 ** 2:.0f}MB）")
+                return True
+            if got > before:
+                log(f"  [中断] 已下载 {got / 1024 ** 2:.0f}MB（curl 退出码 {code}）")
+                if attempt < passes:
+                    log(f"  从断点续传（第 {attempt}/{passes - 1} 次）...")
+                    continue
+            else:
+                log(f"  [失败] 本轮无进展（curl 退出码 {code}），换下一个源...")
+                break
     log(f"  [失败] 未能下载 {dest.name}")
-    log(f"         可手动下载后放到：{dest}")
+    log(f"         请确认已开启 VPN / 能访问 github.com，然后重新运行本脚本")
+    log(f"         （会从已下载的部分继续）。也可手动下载后放到：{dest}")
     for url in urls:
         log(f"           {url}")
-    log(f"         放好后重新运行本脚本即可（会自动跳过已下载部分）。")
     return False
 
 
@@ -134,7 +154,15 @@ def ensure_voice() -> bool:
     vdir.mkdir(parents=True, exist_ok=True)
     ok = True
     for name, (url, mb) in VOICE_FILES.items():
-        if not _curl_download(url, vdir / name, mb):
+        dest = vdir / name
+        # 引擎包自带的同名文件（实测 SHA256 与 Release 一致）直接复用，不再下载
+        bundled = ENGINE_TARGET / "GPT_SoVITS" / "pretrained_models" / name
+        if (not dest.exists() and bundled.exists()
+                and bundled.stat().st_size >= mb * 1024 ** 2 * 0.85):
+            shutil.copy2(bundled, dest)
+            log(f"  [OK] {name} 复用引擎自带文件（与 Release 一致，跳过下载）")
+            continue
+        if not _curl_download(url, dest, mb):
             ok = False
     if ok:
         log("  [OK] 语音模型就绪（s1v3.ckpt + sf_e8_s144.pth）")
@@ -209,7 +237,7 @@ def main():
     log("=" * 58)
     log("   J1 本地AI陪伴 · 一键安装（便携版）")
     log("=" * 58)
-    log("  需要联网：下载引擎约 4GB + 对话模型约 5GB。")
+    log("  需要联网：引擎约 8GB + 对话模型约 5GB + 语音模型约 0.1GB。")
     log()
     ok = True
 
@@ -218,7 +246,7 @@ def main():
         ok = False
     log()
 
-    log("[2/4] 语音模型（GitHub Release）...")
+    log("[2/4] 语音模型（GitHub Release，需能访问 github.com）...")
     if not ensure_voice():
         ok = False
     log()

@@ -18,8 +18,7 @@ set "ENGINE_TARGET=engine\%ENGINE_DIRNAME%"
 set "RUNTIME_PY=%ENGINE_TARGET%\runtime\python.exe"
 set "PKG=engine\%ENGINE_DIRNAME%.7z"
 set "SEVENZR=tools\7zr.exe"
-set "URL1=https://hf-mirror.com/lj1995/GPT-SoVITS-windows-package/resolve/main/GPT-SoVITS-v2pro-20250604-nvidia50.7z"
-set "URL2=https://huggingface.co/lj1995/GPT-SoVITS-windows-package/resolve/main/GPT-SoVITS-v2pro-20250604-nvidia50.7z"
+set "URL=https://huggingface.co/lj1995/GPT-SoVITS-windows-package/resolve/main/GPT-SoVITS-v2pro-20250604-nvidia50.7z"
 
 echo [A] Checking GPT-SoVITS engine ...
 if exist "%RUNTIME_PY%" (
@@ -31,14 +30,16 @@ echo       engine not found, downloading ^(about 8.2 GB, needs internet/VPN^)...
 if not exist "engine" mkdir "engine"
 
 rem --- download with curl (follows redirects, resumes with -C -) ---
+rem Direct HuggingFace only (no mirror). If the line drops, -C - continues
+rem from the .part file, so we allow up to 3 passes.
 set "DL_OK="
-for %%U in ("%URL1%" "%URL2%") do (
+for %%P in (1 2 3) do (
     if not defined DL_OK (
-        echo       trying source: %%~U
-        curl.exe -L -C - --retry 3 --retry-delay 5 -A "Mozilla/5.0" -o "%PKG%.part" "%%~U"
+        curl.exe -L -C - --retry 4 --retry-delay 5 --connect-timeout 20 -A "Mozilla/5.0" -o "%PKG%.part" "%URL%"
         if exist "%PKG%.part" (
-            rem sanity: file should be large (engine is GB-scale)
-            for %%S in ("%PKG%.part") do if %%~zS GTR 1000000000 (
+            rem sanity: the engine package is about 8.2 GB; a truncated
+            rem download (e.g. 1-7 GB) must NOT pass this check.
+            for %%S in ("%PKG%.part") do if %%~zS GTR 8000000000 (
                 move /y "%PKG%.part" "%PKG%" >nul
                 set "DL_OK=1"
             )
@@ -48,8 +49,10 @@ for %%U in ("%URL1%" "%URL2%") do (
 
 if not defined DL_OK (
     echo [ERROR] engine download failed.
-    echo   Please manually download this file and place it at: %PKG%
-    echo     %URL2%
+    echo   Make sure VPN is ON and huggingface.co is reachable, then run this file again
+    echo   -- it resumes from where it stopped.
+    echo   Or manually download this file and place it at: %PKG%
+    echo     %URL%
     echo   Then run this file again.
     pause
     exit /b 1
