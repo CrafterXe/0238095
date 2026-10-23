@@ -14,6 +14,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 import urllib.request
 from pathlib import Path
 
@@ -21,9 +22,11 @@ ROOT = Path(__file__).resolve().parent
 
 # ================== 可按需修改 ==================
 # GPT-SoVITS 官方集成包（Windows / NVIDIA，v2pro-20250604）下载地址与解压后目录名。
-# 直连 HuggingFace 官方 CDN（不使用镜像站），需能访问 huggingface.co（请开启 VPN）。
+# 首选 HF 官方源；国内裸连通常 8 秒内即连接超时，失败后自动切换 hf-mirror 镜像
+# （镜像会 302 跳转到 xethub CDN，实测稳定可用）。
 ENGINE_URLS = (
     "https://huggingface.co/lj1995/GPT-SoVITS-windows-package/resolve/main/GPT-SoVITS-v2pro-20250604-nvidia50.7z",
+    "https://hf-mirror.com/lj1995/GPT-SoVITS-windows-package/resolve/main/GPT-SoVITS-v2pro-20250604-nvidia50.7z",
 )
 ENGINE_DIRNAME = "GPT-SoVITS-v2pro-20250604-nvidia50"
 ENGINE_APPROX_GB = 8.2
@@ -34,9 +37,11 @@ OLLAMA_MODEL = "R4C3R/qwen3-8b-heretic:q4_k_m"
 # 注：GPT 底模 s1v3.ckpt 随引擎集成包自带（与 Release 文件 SHA256 一致），
 #     config.py 直接指向引擎内文件，这里不需要再下载。
 VOICE_FILES = {
-    # 文件名: (Release 直链, 约略大小MB)
+    # 文件名: (Release 直链, 精确字节数)
+    # 字节数取自 Release 资产元数据（assets[].size），不再用 85% 模糊阈值。
+    # sf_e8_s144.pth 约 129MB
     "sf_e8_s144.pth": (
-        "https://github.com/CrafterXe/model-files/releases/download/v1/sf_e8_s144.pth", 129),
+        "https://github.com/CrafterXe/model-files/releases/download/v1/sf_e8_s144.pth", 134946355),
 }
 # ==============================================
 
@@ -67,53 +72,85 @@ def which(name):
     return shutil.which(name) is not None
 
 
-def _curl_download(urls, dest: Path, approx_mb: float = 0, passes: int = 3) -> bool:
+def _curl_download(urls, dest: Path, exact_bytes: int = 0,
+                   approx_mb: float = 0, passes: int = 5) -> bool:
     """用 curl.exe 从 GitHub 直连下载（跟随重定向，断点续传 -C -）。
-    连接中途被重置时，同一源会继续从断点续传（最多 passes 轮）；
-    下载完成后校验体积，明显偏小视为失败并换源。"""
+
+    exact_bytes > 0：按精确字节数校验（推荐，Release 资产有确定大小）；
+    exact_bytes == 0：退回“约多少 MB × 0.85”的宽松校验（仅用于拿不到精确大小的资产）。
+    已存在且大小符合预期直接跳过。零进展也会重试（指数退避 5/10/20/30 秒），
+    直到 passes 轮用尽才切换下一个源。
+    """
     if isinstance(urls, str):
         urls = (urls,)
     approx_bytes = approx_mb * 1024 ** 2
     min_bytes = int(approx_bytes * 0.85)
-    if dest.exists() and (approx_bytes <= 0 or dest.stat().st_size >= min_bytes):
-        log(f"  [跳过] 已存在：{dest.name}")
-        return True
+
+    if dest.exists():
+        have = dest.stat().st_size
+        if exact_bytes > 0:
+            if have == exact_bytes:
+                log(f"  [跳过] 已存在且大小精确：{dest.name}（{have} 字节）")
+                return True
+        elif approx_bytes <= 0 or have >= min_bytes:
+            log(f"  [跳过] 已存在：{dest.name}")
+            return True
+
     dest.parent.mkdir(parents=True, exist_ok=True)
     curl = shutil.which("curl") or "curl.exe"
     tmp = dest.with_suffix(dest.suffix + ".part")
-    size_txt = f"{approx_mb / 1024:.1f}GB" if approx_mb >= 1024 else f"{approx_mb:.0f}MB"
+
+    if exact_bytes > 0:
+        want = f"{exact_bytes} 字节"
+    elif approx_mb > 0:
+        want = f"约 {approx_mb:.0f}MB"
+    else:
+        want = "大小未知"
+
     for url in urls:
-        log(f"  正在下载 {dest.name}（约 {size_txt}）...")
+        log(f"  正在下载 {dest.name}（{want}）...")
         log(f"  源：{url.split('/')[2]}")
         for attempt in range(1, passes + 1):
             before = tmp.stat().st_size if tmp.exists() else 0
+            log(f"  [第 {attempt}/{passes} 轮] 当前已有 {before} 字节，正在连接 ...")
             code = subprocess.call([
-                curl, "-L", "-C", "-", "--retry", "4", "--retry-delay", "5",
-                "--connect-timeout", "20", "-A", "Mozilla/5.0", "-o", str(tmp), url,
+                curl, "-L", "-C", "-", "--retry", "3", "--retry-delay", "5",
+                "--connect-timeout", "8", "-A", "Mozilla/5.0",
+                "-o", str(tmp), url,
             ])
             got = tmp.stat().st_size if tmp.exists() else 0
             # 33 = 服务器返回 416，说明 .part 已完整
             if code in (0, 33) and got > 0:
-                if approx_bytes > 0 and got < min_bytes:
-                    log(f"  [失败] 文件不完整（{got / 1024 ** 2:.0f}MB < 约 {approx_mb:.0f}MB），换源...")
+                if exact_bytes > 0 and got != exact_bytes:
+                    log(f"  [失败] 大小不符：应有 {exact_bytes} 字节，实际 {got} 字节")
                     tmp.unlink(missing_ok=True)
-                    break
-                tmp.rename(dest)
-                log(f"  [OK] {dest.name}（{got / 1024 ** 2:.0f}MB）")
-                return True
-            if got > before:
-                log(f"  [中断] 已下载 {got / 1024 ** 2:.0f}MB（curl 退出码 {code}）")
-                if attempt < passes:
-                    log(f"  从断点续传（第 {attempt}/{passes - 1} 次）...")
-                    continue
+                elif exact_bytes <= 0 and approx_bytes > 0 and got < min_bytes:
+                    log(f"  [失败] 文件不完整（{got / 1024 ** 2:.0f}MB < 约 {approx_mb:.0f}MB）")
+                    tmp.unlink(missing_ok=True)
+                else:
+                    tmp.replace(dest)
+                    log(f"  [OK] {dest.name}（{dest.stat().st_size} 字节）")
+                    return True
+            elif got > before:
+                log(f"  [中断] 已下载 {got} 字节（curl 退出码 {code}）")
             else:
-                log(f"  [失败] 本轮无进展（curl 退出码 {code}），换下一个源...")
-                break
+                log(f"  [失败] 本轮无进展（curl 退出码 {code}）")
+
+            if attempt < passes:
+                delay = min(5 * 2 ** (attempt - 1), 30)
+                log(f"  {delay} 秒后重试（第 {attempt + 1}/{passes} 轮）...")
+                time.sleep(delay)
+        log(f"  [失败] 该源重试 {passes} 轮仍未成功，换下一个源...")
+
+    actual = dest.stat().st_size if dest.exists() else (
+        tmp.stat().st_size if tmp.exists() else 0)
     log(f"  [失败] 未能下载 {dest.name}")
-    log(f"         请确认已开启 VPN / 能访问 github.com，然后重新运行本脚本")
-    log(f"         （会从已下载的部分继续）。也可手动下载后放到：{dest}")
+    log(f"         应有字节数：{exact_bytes if exact_bytes > 0 else want}；实际：{actual} 字节")
+    log(f"         手动下载地址：")
     for url in urls:
         log(f"           {url}")
+    log(f"         请保存到（保持文件名）：{dest}")
+    log(f"         放好后重新运行本脚本即可，已完成的文件会自动跳过。")
     return False
 
 
@@ -126,7 +163,7 @@ def ensure_engine() -> bool:
     log(f"  未找到 GPT-SoVITS 引擎，准备自动下载并解压（约 {ENGINE_APPROX_GB}GB）...")
     log("  提示：下载源会跳转到 HuggingFace 官方 CDN，需可访问（如已开启 VPN）。")
     pkg = ENGINE_DIR / (ENGINE_DIRNAME + ".7z")
-    if not _curl_download(ENGINE_URLS, pkg, ENGINE_APPROX_GB * 1024):
+    if not _curl_download(ENGINE_URLS, pkg, approx_mb=ENGINE_APPROX_GB * 1024):
         return False
     if not SEVENZR.exists():
         log(f"  [失败] 缺少解压器 {SEVENZR}（应随包携带）")
@@ -151,8 +188,8 @@ def ensure_voice() -> bool:
     vdir = ROOT / "voice_model"
     vdir.mkdir(parents=True, exist_ok=True)
     ok = True
-    for name, (url, mb) in VOICE_FILES.items():
-        if not _curl_download(url, vdir / name, mb):
+    for name, (url, exact) in VOICE_FILES.items():
+        if not _curl_download(url, vdir / name, exact_bytes=exact):
             ok = False
     if ok:
         log("  [OK] 语音音色模型就绪（sf_e8_s144.pth）")

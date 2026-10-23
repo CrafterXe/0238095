@@ -5,7 +5,7 @@ rem  J1 one-click launcher (portable, no absolute paths).
 rem  Everything is resolved from this script's own folder (%~dp0):
 rem    [1/4] locate embedded GPT-SoVITS python (engine\*\runtime\python.exe)
 rem    [2/4] ensure Ollama is running          (port 11434)
-rem    [3/4] ensure TTS GPT-SoVITS api_v2      (port 9880)
+rem    [3/4] check voice weights + ensure TTS  (port 9880)
 rem    [4/4] run the J1 Gradio panel           (port 14001, foreground)
 rem  IMPORTANT: keep this file saved as CRLF + ASCII.
 rem  A .bat with LF-only endings breaks "goto" labels on Windows.
@@ -54,6 +54,37 @@ if errorlevel 1 (
 )
 
 echo [3/4] Checking TTS voice service - GPT-SoVITS api_v2...
+rem ---- voice weights: exact size check (sf_e8_s144.pth = 134946355 bytes) ----
+set "VOICE_DISABLED="
+set "VOICE_SIZE="
+set "VOICE_PATH=%~dp0voice_model\sf_e8_s144.pth"
+if exist "%VOICE_PATH%" for %%A in ("%VOICE_PATH%") do set "VOICE_SIZE=%%~zA"
+if "%VOICE_SIZE%"=="134946355" goto voice_ok
+if not defined VOICE_SIZE set "VOICE_SIZE=not found"
+echo.
+echo   [WARN] Voice model missing or incomplete.
+echo          File : voice_model\sf_e8_s144.pth
+echo          Need : 134946355 bytes (about 129 MB)
+echo          Found: %VOICE_SIZE%
+echo.
+echo   How to fix (either way):
+echo     Option 1 - run install.bat
+echo                It will retry automatically. Completed files are skipped.
+echo                You may run it as many times as needed.
+echo     Option 2 - download manually, then put the file here (keep the name):
+echo                https://github.com/CrafterXe/model-files/releases/download/v1/sf_e8_s144.pth
+echo                "%VOICE_PATH%"
+echo                (Requires VPN in some regions.)
+echo.
+echo   Chat panel will still start. Voice will be disabled until the file is in place.
+echo   After fixing, run start.bat again to enable voice.
+echo.
+set "VOICE_DISABLED=1"
+goto panel_start
+
+:voice_ok
+echo       Voice model OK.
+
 call :check_url "http://127.0.0.1:9880/docs"
 if not errorlevel 1 (
     echo       TTS already running.
@@ -85,7 +116,9 @@ echo.
 echo       TTS ready.
 
 :panel_start
-echo [4/4] Starting J1 panel at http://127.0.0.1:14001 ...
+set "VOICE_TAG="
+if defined VOICE_DISABLED set "VOICE_TAG= (voice disabled)"
+echo [4/4] Starting J1 panel at http://127.0.0.1:14001 ...%VOICE_TAG%
 "%PY%" "%~dp0app.py"
 echo.
 echo Panel stopped.
